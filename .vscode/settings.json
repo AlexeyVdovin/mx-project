@@ -1,9 +1,10 @@
 {
-    "cortex-debug.armToolchainPath": "/usr/bin",
-    "cortex-debug.openocdPath": "/usr/bin/openocd",
-    "files.associations": {
-        "*.tcc": "cpp",
-        "stm32f1xx_hal_rcc_ex.h": "c",
-        "usb_device.h": "c"
-    }
+  "files.associations": {
+    "main.h": "c",
+    "stm32f0xx_hal.h": "c",
+    "stm32f0xx_hal_def.h": "c"
+  },
+  "C_Cpp.default.defines": [
+    "STM32F030x8"
+  ]
 }
