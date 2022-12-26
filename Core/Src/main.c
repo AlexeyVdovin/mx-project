@@ -110,7 +110,7 @@ int main(void)
  
     if(UserRxBufferFS_len > 0)
     {
-      uint16_t rc, len = UserRxBufferFS_len;
+      uint16_t len = UserRxBufferFS_len;
       char c, *cmd = 0;
       uint32_t addr;
       uint32_t val;
@@ -124,25 +124,38 @@ int main(void)
         else break;
       } while (len > 0);
 
-      if(len > 3 && UserRxBufferFS[2] == ' ')
+      do if(len > 3 && UserRxBufferFS[2] == ' ')
       {
+        char *s, *str = (char*)UserRxBufferFS+3;
+        //rc = sscanf((const char*)(UserRxBufferFS+3), "%ld,%ld", &addr, &val);
+        addr = strtol(str, &s, 0);
+        if(str == s) break;
         cmd = (char*)UserRxBufferFS;
-        rc = sscanf((const char*)(UserRxBufferFS+3), "%ld,%ld", &addr, &val);
-
-        if(rc == 1 && memcmp(cmd, "rr", 2) == 0)
+        if(memcmp(cmd, "rr ", 3) == 0)
         {
           p = (uint32_t*)addr;
           val = *p;
-          sprintf(rep, "0x%08ld : 0x%08ld\n", addr, val);
+          sprintf(rep, "0x%08lx : 0x%08lx\n", addr, val);
+          break;
         }
-        else if(rc == 2 && memcmp(cmd, "wr", 2) == 0)
+        cmd = 0;
+        while(s-str < strlen(str))
+        {
+          str = s+1;
+          val = strtol(str, &s, 0);
+          if(str != s) break;
+        }     
+        if(str == s) break;
+        cmd = (char*)UserRxBufferFS;
+        if(memcmp(cmd, "wr ", 3) == 0)
         {
           p = (uint32_t*)addr;
           *p = val;
-          sprintf(rep, "0x%08ld : 0x%08ld\n", addr, val);
+          sprintf(rep, "0x%08lx : 0x%08lx\n", addr, val);
+          break;
         }
-        else cmd = 0;
-      }
+        cmd = 0;
+      } while(0);
       if(cmd == 0)
       {
         snprintf(rep, sizeof(rep), "Error: '%s'\n", UserRxBufferFS);
