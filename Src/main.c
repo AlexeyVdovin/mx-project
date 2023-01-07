@@ -37,9 +37,10 @@ enum
 
 enum
 {
-  REG_CTL_LOW_PWR = 0x0001,
-  REG_CTL_DR1     = 0x0002,
-  REG_CTL_DR2     = 0x0004
+  REG_CTL_LOW_PWR   = 0x0001,
+  REG_CTL_DR1       = 0x0002,
+  REG_CTL_DR2       = 0x0004,
+  REG_CTL_ENABLE_PM = 0x8000
 };
 
 typedef struct
@@ -86,6 +87,8 @@ typedef union
 #define I2C_SLAVE_ADDR  0x30
 
 #define max(a,b) ((a)>(b)?(a):(b))
+#define BIT_SET(var, bit, value) (((var) & (~(bit))) | (((value) ? (bit) : 0)))
+
 
 /* USER CODE END PD */
 
@@ -156,7 +159,7 @@ void LED_Green(GPIO_PinState PinState)
 
 void PWR_Enable(GPIO_PinState PinState)
 {
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, PinState);
+  if(regs.control & REG_CTL_ENABLE_PM) HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, PinState);
 }
 
 void DR1_Start(int dir)
@@ -208,52 +211,36 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
   adc_sum[3] += adc[3];
 }
 
-uint8_t Transfer_Direction = 0;
-uint8_t RxBuffer[10];
 uint8_t reg_addr = 0;
 
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode)
 {
+  HAL_StatusTypeDef rc;
   uint8_t* r = (uint8_t*)&regs;
   uint8_t  a = reg_addr;
-  wdt_i2c = regs.tick + 2000;
+  wdt_i2c = regs.tick + 30000;
 
-  Transfer_Direction = TransferDirection;
-  if (Transfer_Direction != 0) // Slave Tx
+  if(TransferDirection != I2C_DIRECTION_TRANSMIT) // Slave Tx
   {
-    if (HAL_I2C_Slave_Seq_Transmit_IT(&hi2c1, r+a, sizeof(regs)-a, I2C_FIRST_AND_LAST_FRAME) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
+    rc = HAL_I2C_Slave_Seq_Transmit_IT(&hi2c1, r+a, sizeof(regs)-a, I2C_NEXT_FRAME);
   }
   else   // Slave Rx
   {
-    if (HAL_I2C_Slave_Seq_Receive_IT(&hi2c1, RxBuffer, sizeof(RxBuffer), I2C_FIRST_AND_LAST_FRAME) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
+    // First byte is a REG address
+    rc = HAL_I2C_Slave_Seq_Receive_IT(&hi2c1, &reg_addr, sizeof(reg_addr), I2C_NEXT_FRAME);
+  }
+  if(rc != HAL_OK)
+  {
+    Error_Handler();
   }
 }
 
 // i2c STOP handler
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
 {
-  uint8_t* r = (uint8_t*)&regs;
-  uint8_t  n, a = reg_addr;
-  uint8_t  sz = sizeof(RxBuffer) - hi2c->XferSize;
+  uint8_t  sz = sizeof(regs)-reg_addr - hi2c->XferSize-1;
 
-  if(Transfer_Direction == 0 && sz > 0) // Slave Rx -> Write to actual REGS
-  {
-    a = RxBuffer[0];
-    n = 1;
-    while(--sz && a < sizeof(regs))
-    {
-      r[a++] = RxBuffer[n++];
-    }
-    reg_addr = a;
-  }
+  reg_addr += sz;
 
   if(HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK)
   {
@@ -261,6 +248,7 @@ void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
   }
 }
 
+/*
 void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *I2cHandle)
 {
   if(HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK)
@@ -268,10 +256,14 @@ void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *I2cHandle)
     Error_Handler();
   }
 }
+*/
 
 void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *I2cHandle)
 {
-  if(HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK)
+  uint8_t* r = (uint8_t*)&regs;
+  uint8_t  a = reg_addr;
+
+  if(HAL_I2C_Slave_Seq_Receive_IT(&hi2c1, r+a, sizeof(regs)-a, I2C_NEXT_FRAME) != HAL_OK)
   {
     Error_Handler();
   }
@@ -345,7 +337,7 @@ int main(void)
 
   HAL_ADC_Start_DMA(&hadc, (uint32_t*)adcBuffer, 6);
 
-  LED_Green(LED_OFF);
+  LED_Green(LED_ON);
 
   printf("Hello !\n");  
   /* USER CODE END 2 */
@@ -354,7 +346,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   t1 = regs.tick + 100;
   t2 = regs.tick + 200;
-  wdt_i2c = regs.tick + 2000; // 20 sec
+  wdt_i2c = regs.tick + 30000; // 5min
 
   tdr1 = regs.tick + 2000;
   DR1_Start(0);
@@ -369,7 +361,7 @@ int main(void)
       uint16_t c;
       t1 = regs.tick+10;
 
-      regs.status = (regs.status & (~REG_ST_1W_PWR_OK)) | ((PWR_1w_status()) ? REG_ST_1W_PWR_OK : 0);
+      regs.status = BIT_SET(regs.status, REG_ST_1W_PWR_OK, PWR_1w_status());
       regs.adc_12v = conf.kv_12v.k*(adc_sum[0]/dma_n)/4096 + conf.kv_12v.c;
       regs.adc_batt = conf.kv_batt.k*(adc_sum[1]/dma_n)/4096 + conf.kv_batt.c;
       regs.adc_z5v = conf.kv_z5v.k*(adc_sum[2]/dma_n)/8192 + conf.kv_z5v.c;
@@ -399,27 +391,27 @@ int main(void)
     }
     if(t2 < regs.tick)
     {
-      int status = regs.status & 0x0007;
-      t2 = regs.tick+100;
+      int status = regs.status & REG_ST_STATUS;
+      t2 = regs.tick+50;
 
       if(regs.adc_z3v3 < 2900 && status == ST_IDLE)
       { // Self power OFF, waiting for power cycle
-        wdt_i2c = regs.tick + 2000;
+        wdt_i2c = regs.tick + 1000; // 10sec
         if(regs.control & REG_CTL_LOW_PWR) status = ST_LOW_POWER;
         else status = ST_SHDN;
         LED_Green(LED_OFF);
-        // PWR_Enable(PWR_OFF);
+        PWR_Enable(PWR_OFF);
       }
-      if(regs.adc_batt < 10000 && regs.adc_12v < 11500 && status == ST_IDLE)
+      if(regs.adc_batt < 10500 && regs.adc_12v < 11500 && status == ST_IDLE)
       { // Emergency low power, forcing power OFF
-        wdt_i2c = regs.tick + 2000;
+        wdt_i2c = regs.tick + 3000; // 30sec
         status = ST_LOW_POWER;
         LED_Green(LED_OFF);
-        // PWR_Enable(PWR_OFF);
+        PWR_Enable(PWR_OFF);
       }
       else if((regs.adc_batt > 12000 || regs.adc_12v > 12500) && status == ST_LOW_POWER)
       { // Delay before Power ON to stabilize power
-        wdt_i2c = regs.tick + 2000;
+        wdt_i2c = regs.tick + 1000; // 10sec
         status = ST_SHDN;
       }
 
@@ -427,32 +419,33 @@ int main(void)
       // printf("%d\t%d\t%d\t%d\n", regs.adc_12v, regs.adc_batt, regs.adc_z5v, regs.adc_z3v3);
 
       LED_Red(LED_TOGGLE);
-      regs.status = (regs.status & (~0x0007)) | (status & 0x0007);
+      regs.status = (regs.status & (~REG_ST_STATUS)) | (status & REG_ST_STATUS);
     }
     if(wdt_i2c != 0 && wdt_i2c < regs.tick)
     {
       int status = regs.status & 0x0007;
-      wdt_i2c = regs.tick + 2000;
+      wdt_i2c = regs.tick + 30000; // 5min
       if(status == ST_START)
       { // OPi is starting, give it more time
         status = ST_IDLE;
       }
       else if(status == ST_IDLE)
       { // No activity from OPi, force power cycle
+        wdt_i2c = regs.tick + 1000; // 10sec
         printf("WDT reboot!\n");
         status = ST_SHDN;
         LED_Green(LED_OFF);
-        // PWR_Enable(PWR_OFF);
+        PWR_Enable(PWR_OFF);
       }
       else if(status == ST_SHDN)
       { // Time to power ON
         printf("Power On!\n");
         status = ST_START;
-        regs.control &= ~REG_CTL_LOW_PWR;
+        regs.control &= ~(REG_CTL_LOW_PWR|REG_CTL_ENABLE_PM);
         LED_Green(LED_ON);
         PWR_Enable(PWR_ON);
       }
-      regs.status = (regs.status & (~0x0007)) | (status & 0x0007);
+      regs.status = (regs.status & (~REG_ST_STATUS)) | (status & REG_ST_STATUS);
     }
     /* USER CODE END WHILE */
 
