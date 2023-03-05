@@ -31,8 +31,10 @@
 
 enum
 {
-  REG_ST_STATUS = 0x0007,
-  REG_ST_1W_PWR_OK = 0x0010
+  REG_ST_STATUS    = 0x0007,
+  REG_ST_RESET     = 0x0008,
+  REG_ST_1W_PWR_OK = 0x0010,
+  REG_ST_DISABLE   = 0x0020,
 };
 
 enum
@@ -40,6 +42,7 @@ enum
   REG_CTL_LOW_PWR   = 0x0001,
   REG_CTL_DR1       = 0x0002,
   REG_CTL_DR2       = 0x0004,
+  REG_CTL_SHTDN     = 0x0008,
   REG_CTL_ENABLE_PM = 0x8000
 };
 
@@ -116,6 +119,7 @@ volatile REGS regs;
 volatile CONF conf;
 
 volatile uint64_t wdt_i2c;
+volatile uint64_t wdt_pwr;
 
 
 /* USER CODE END PV */
@@ -145,6 +149,11 @@ static void MX_TIM6_Init(void);
 #define PWR_OFF GPIO_PIN_RESET
 #define PWR_ON  GPIO_PIN_SET
 
+inline int Is_IO_Enabled()
+{
+  return !(regs.status & REG_ST_DISABLE);
+}
+
 void LED_Red(GPIO_PinState PinState)
 {
   if(PinState > GPIO_PIN_SET) HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_8);
@@ -156,34 +165,92 @@ void LED_Green(GPIO_PinState PinState)
   if(PinState > GPIO_PIN_SET) HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
   else HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, PinState);
 }
+void USART1_Disable()
+{
+#if 0
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  HAL_UART_MspDeInit(&huart1);
+  /*Configure GPIO pins : PA9 PA10 */
+  GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_10;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9|GPIO_PIN_10, GPIO_PIN_RESET);
+#endif
+}
+
+void I2C1_Disable()
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  HAL_I2C_DeInit(&hi2c1);
+  /*Configure GPIO pins : PB6 PB7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_RESET);
+}
 
 void PWR_Enable(GPIO_PinState PinState)
 {
+  if(PinState)
+  {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+#if 0    
+    /*Configure GPIO pins : PA9 PA10 */
+    GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_10;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    MX_USART1_UART_Init();
+#endif
+    /*Configure GPIO pins : PB6 PB7 */
+    GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    MX_I2C1_Init();
+
+    regs.status &= ~REG_ST_DISABLE;
+  }
   if(regs.control & REG_CTL_ENABLE_PM) HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, PinState);
+  // printf("PWR_Enabe(%s)\n", PinState ? "ON" : "OFF");
+  LED_Green(!PinState);
 }
 
 void DR1_Start(int dir)
 {
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, dir ? GPIO_PIN_RESET : GPIO_PIN_SET);
+  // printf("DR1_Start(%s)\n", dir ? "open" : "close");
 }
 
 void DR1_Stop()
 {
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  // printf("DR1_Stop()\n");
 }
 
 void DR2_Start(int dir)
 {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, dir ? GPIO_PIN_RESET : GPIO_PIN_SET);
+  // printf("DR2_Start(%s)\n", dir ? "open" : "close");
 }
 
 void DR2_Stop()
 {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
+  // printf("DR2_Stop()\n");
 }
 
 GPIO_PinState PWR_1w_status()
@@ -218,7 +285,7 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, ui
   HAL_StatusTypeDef rc;
   uint8_t* r = (uint8_t*)&regs;
   uint8_t  a = reg_addr;
-  wdt_i2c = regs.tick + 30000;
+  wdt_i2c = regs.tick + 6000; // 1 min
 
   if(TransferDirection != I2C_DIRECTION_TRANSMIT) // Slave Tx
   {
@@ -322,31 +389,33 @@ int main(void)
   /* USER CODE BEGIN SysInit */
 
   memset((void*)&regs, 0, sizeof(regs)); 
+  regs.control |= REG_CTL_ENABLE_PM;
+  regs.status  = ST_START;
 
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART1_UART_Init();
   MX_DMA_Init();
   MX_ADC_Init();
-  MX_I2C1_Init();
+  MX_USART1_UART_Init();
+//  MX_I2C1_Init();
+  PWR_Enable(PWR_ON);
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   RetargetInit(&huart1);
 
   HAL_ADC_Start_DMA(&hadc, (uint32_t*)adcBuffer, 6);
 
-  LED_Green(LED_ON);
-
-  printf("Hello !\n");  
+  // printf("Hello !\n");  
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   t1 = regs.tick + 100;
   t2 = regs.tick + 200;
-  wdt_i2c = regs.tick + 30000; // 5min
+  wdt_pwr = regs.tick + 1000; // 10 sec
+  wdt_i2c = regs.tick + 6000; // 60 sec
 
   tdr1 = regs.tick + 2000;
   DR1_Start(0);
@@ -360,6 +429,16 @@ int main(void)
     {
       uint16_t c;
       t1 = regs.tick+10;
+
+      if(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) == GPIO_PIN_RESET && (regs.status&REG_ST_STATUS) == ST_IDLE)
+      {
+        // TODO: ST_LOW_POWER
+        regs.status = (regs.status & (~REG_ST_STATUS)) | REG_ST_DISABLE | ST_SHDN;
+        wdt_pwr = regs.tick + 1000; // 10 sec
+        I2C1_Disable();
+        USART1_Disable();
+        PWR_Enable(PWR_OFF);
+      }
 
       regs.status = BIT_SET(regs.status, REG_ST_1W_PWR_OK, PWR_1w_status());
       regs.adc_12v = conf.kv_12v.k*(adc_sum[0]/dma_n)/4096 + conf.kv_12v.c;
@@ -384,8 +463,8 @@ int main(void)
         tdr2 = regs.tick + 2000;
         DR2_Start(regs.control & REG_CTL_DR2);
       }
-
       ctl = regs.control;
+
       if(tdr1 && tdr1 < regs.tick) { tdr1 = 0; DR1_Stop(); }
       if(tdr2 && tdr2 < regs.tick) { tdr2 = 0; DR2_Stop(); }
     }
@@ -394,24 +473,16 @@ int main(void)
       int status = regs.status & REG_ST_STATUS;
       t2 = regs.tick+50;
 
-      if(regs.adc_z3v3 < 2900 && status == ST_IDLE)
-      { // Self power OFF, waiting for power cycle
-        wdt_i2c = regs.tick + 1000; // 10sec
-        if(regs.control & REG_CTL_LOW_PWR) status = ST_LOW_POWER;
-        else status = ST_SHDN;
-        LED_Green(LED_OFF);
-        PWR_Enable(PWR_OFF);
-      }
-      if(regs.adc_batt < 10500 && regs.adc_12v < 11500 && status == ST_IDLE)
+      if(regs.adc_batt < 10500 && regs.adc_12v < 11000 && status == ST_IDLE)
       { // Emergency low power, forcing power OFF
-        wdt_i2c = regs.tick + 3000; // 30sec
         status = ST_LOW_POWER;
-        LED_Green(LED_OFF);
+        I2C1_Disable();
+        USART1_Disable();
         PWR_Enable(PWR_OFF);
       }
       else if((regs.adc_batt > 12000 || regs.adc_12v > 12500) && status == ST_LOW_POWER)
       { // Delay before Power ON to stabilize power
-        wdt_i2c = regs.tick + 1000; // 10sec
+        wdt_pwr = regs.tick + 1000; // 10 sec
         status = ST_SHDN;
       }
 
@@ -421,29 +492,31 @@ int main(void)
       LED_Red(LED_TOGGLE);
       regs.status = (regs.status & (~REG_ST_STATUS)) | (status & REG_ST_STATUS);
     }
-    if(wdt_i2c != 0 && wdt_i2c < regs.tick)
+    if(wdt_i2c < regs.tick || (wdt_pwr != 0 && wdt_pwr < regs.tick))
     {
-      int status = regs.status & 0x0007;
-      wdt_i2c = regs.tick + 30000; // 5min
+      int status = regs.status & REG_ST_STATUS;
+      wdt_pwr = 0;
+      wdt_i2c = regs.tick + 6000; // 1 min
       if(status == ST_START)
       { // OPi is starting, give it more time
         status = ST_IDLE;
       }
       else if(status == ST_IDLE)
       { // No activity from OPi, force power cycle
-        wdt_i2c = regs.tick + 1000; // 10sec
-        printf("WDT reboot!\n");
+        wdt_pwr = regs.tick + 1000; // 10sec
+        // printf("WDT reboot!\n");
         status = ST_SHDN;
-        LED_Green(LED_OFF);
+        I2C1_Disable();
+        USART1_Disable();
         PWR_Enable(PWR_OFF);
       }
       else if(status == ST_SHDN)
       { // Time to power ON
-        printf("Power On!\n");
+        // printf("Power On!\n");
+        wdt_pwr = regs.tick + 1000; // 10sec
         status = ST_START;
-        regs.control &= ~(REG_CTL_LOW_PWR|REG_CTL_ENABLE_PM);
-        LED_Green(LED_ON);
         PWR_Enable(PWR_ON);
+        regs.control &= ~(REG_CTL_LOW_PWR);
       }
       regs.status = (regs.status & (~REG_ST_STATUS)) | (status & REG_ST_STATUS);
     }
@@ -740,12 +813,13 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14|GPIO_PIN_3|GPIO_PIN_4
-                          |GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11|GPIO_PIN_12, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PC13 */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
@@ -754,10 +828,16 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB14 PB15 PB3 PB4
-                           PB8 PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15|GPIO_PIN_3|GPIO_PIN_4
-                          |GPIO_PIN_8|GPIO_PIN_9;
+  /*Configure GPIO pin : PB14 */
+  GPIO_InitStruct.Pin = GPIO_PIN_14;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB15 PB3 PB4 PB8
+                           PB9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_15|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_8
+                          |GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -769,6 +849,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PA9 PA10 */
+  GPIO_InitStruct.Pin = GPIO_PIN_9|GPIO_PIN_10;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9|GPIO_PIN_10, GPIO_PIN_RESET);
 
 }
 
