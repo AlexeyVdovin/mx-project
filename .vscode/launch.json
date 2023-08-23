@@ -4,7 +4,7 @@
         {
             "name": "Cortex Debug",
             "cwd": "${workspaceRoot}",
-            "executable": "build/blink.elf",
+            "executable": "build/mx.elf",
             "request": "launch",
             "type": "cortex-debug",
             "servertype": "openocd",

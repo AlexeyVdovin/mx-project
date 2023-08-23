@@ -40,7 +40,7 @@
 			"command": "st-flash",
 			"args": [
 				"write",
-				"build/blink.bin",
+				"build/mx.bin",
 				"0x08000000"
 			],
 			"options": {
