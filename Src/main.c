@@ -59,7 +59,10 @@ lwrb_t usart_tx_rb;
 uint8_t usart_tx_rb_data[128];
 volatile size_t usart_tx_dma_current_len;
 
-uint8_t usart_rx_dma_buffer[64];
+lwrb_t usart_rx_rb;
+uint8_t usart_rx_rb_data[128];
+
+uint8_t usart_rx_dma_buffer[32];
 
 /* USER CODE END PV */
 
@@ -73,6 +76,8 @@ static void MX_USART2_UART_Init(void);
 
 /* USER CODE BEGIN PFP */
 size_t usart_send_buff(const char* str, size_t len);
+void usart_rx_check(void);
+uint8_t usart_start_tx_dma_transfer(void);
 
 /* USER CODE END PFP */
 
@@ -99,69 +104,104 @@ void HAL_UART_TxHalfCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
+  lwrb_skip(&usart_tx_rb, usart_tx_dma_current_len);/* Skip buffer, it has been successfully sent out */
+  usart_tx_dma_current_len = 0;           /* Reset data length */
+  usart_start_tx_dma_transfer();          /* Start new transfer */
+
   // Remove me!
-  ++dma_n;
+  // ++dma_n;
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  // Remove me!
-  ++dma_n;
+  if(__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE))  // Check if it is an "Idle Interrupt"
+  {									
+    size_t   len;
+    uint8_t* ptr;
+
+    __HAL_UART_CLEAR_IT(huart, USART_ICR_IDLECF);
+    usart_rx_check();
+
+    // RX completed, we can start TX
+    if(usart_tx_dma_current_len == 0)
+    {
+      do
+      {
+        len = lwrb_get_linear_block_read_length(&usart_rx_rb);
+        ptr = lwrb_get_linear_block_read_address(&usart_rx_rb);
+        lwrb_write(&usart_tx_rb, ptr, len);        /* Write data to TX buffer for loopback */
+        lwrb_skip(&usart_rx_rb, len);              /* Skip buffer, it has been successfully sent out */
+      } while(len);
+      usart_start_tx_dma_transfer();             /* Then try to start transfer */
+    }
+  }
+  else
+  {
+    usart_rx_check();
+
+  }
 }
 
 void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *huart)
 {
+  usart_rx_check();
   // Remove me!
-  ++dma_n;
+  // ++dma_n;
 }
 
+/*
 // On RX timeout function called with number of received bytes.
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
+  usart_rx_check();
   // Remove me!
   ++dma_n;
-  usart_send_buff((const char*)usart_rx_dma_buffer, Size);
-  HAL_UARTEx_ReceiveToIdle_DMA(&huart2, usart_rx_dma_buffer, sizeof(usart_rx_dma_buffer));
+  // huart->RxState;
+//  usart_send_buff((const char*)usart_rx_dma_buffer, Size);
+//  HAL_UARTEx_ReceiveToIdle_DMA(&huart2, usart_rx_dma_buffer, sizeof(usart_rx_dma_buffer));
 }
+*/
 
 uint8_t usart_start_tx_dma_transfer(void) 
 {
-    uint8_t started = 0;
+  uint8_t started = 0;
+  uint8_t* ptr;
 
-    /*
-     * First check if transfer is currently in-active,
-     * by examining the value of usart_tx_dma_current_len variable.
-     *
-     * This variable is set before DMA transfer is started and cleared in DMA TX complete interrupt.
-     *
-     * It is not necessary to disable the interrupts before checking the variable:
-     *
-     * When usart_tx_dma_current_len == 0
-     *    - This function is called by either application or TX DMA interrupt
-     *    - When called from interrupt, it was just reset before the call,
-     *         indicating transfer just completed and ready for more
-     *    - When called from an application, transfer was previously already in-active
-     *         and immediate call from interrupt cannot happen at this moment
-     *
-     * When usart_tx_dma_current_len != 0
-     *    - This function is called only by an application.
-     *    - It will never be called from interrupt with usart_tx_dma_current_len != 0 condition
-     *
-     * Disabling interrupts before checking for next transfer is advised
-     * only if multiple operating system threads can access to this function w/o
-     * exclusive access protection (mutex) configured,
-     * or if application calls this function from multiple interrupts.
-     *
-     * This example assumes worst use case scenario,
-     * hence interrupts are disabled prior every check
-     */
-    if (usart_tx_dma_current_len == 0 && (usart_tx_dma_current_len = lwrb_get_linear_block_read_length(&usart_tx_rb)) > 0) 
-    {
-        HAL_UART_Transmit_DMA(&huart2, lwrb_get_linear_block_read_address(&usart_tx_rb), usart_tx_dma_current_len);
-        started = 1;
-    }
+  /*
+    * First check if transfer is currently in-active,
+    * by examining the value of usart_tx_dma_current_len variable.
+    *
+    * This variable is set before DMA transfer is started and cleared in DMA TX complete interrupt.
+    *
+    * It is not necessary to disable the interrupts before checking the variable:
+    *
+    * When usart_tx_dma_current_len == 0
+    *    - This function is called by either application or TX DMA interrupt
+    *    - When called from interrupt, it was just reset before the call,
+    *         indicating transfer just completed and ready for more
+    *    - When called from an application, transfer was previously already in-active
+    *         and immediate call from interrupt cannot happen at this moment
+    *
+    * When usart_tx_dma_current_len != 0
+    *    - This function is called only by an application.
+    *    - It will never be called from interrupt with usart_tx_dma_current_len != 0 condition
+    *
+    * Disabling interrupts before checking for next transfer is advised
+    * only if multiple operating system threads can access to this function w/o
+    * exclusive access protection (mutex) configured,
+    * or if application calls this function from multiple interrupts.
+    *
+    * This example assumes worst use case scenario,
+    * hence interrupts are disabled prior every check
+    */
+  if (usart_tx_dma_current_len == 0 && (usart_tx_dma_current_len = lwrb_get_linear_block_read_length(&usart_tx_rb)) > 0) 
+  {
+    ptr = lwrb_get_linear_block_read_address(&usart_tx_rb);
+    HAL_UART_Transmit_DMA(&huart2, ptr, usart_tx_dma_current_len);
+    started = 1;
+  }
 
-    return started;
+  return started;
 }
 
 size_t usart_send_string(const char* str) 
@@ -177,6 +217,73 @@ size_t usart_send_buff(const char* str, size_t len)
     usart_start_tx_dma_transfer();                   /* Then try to start transfer */
     return rc;
 }
+
+void usart_process_data(const uint8_t* data, size_t len) 
+{
+  // Process incoming data on the fly or copy to somewhere for future processing...
+  size_t rc = lwrb_write(&usart_rx_rb, data, len);
+
+  // Remove me!
+  //++dma_n;
+}
+
+void usart_rx_check(void) 
+{
+  static size_t old_pos = 0;
+  size_t pos;
+
+  /* Calculate current position in buffer and check for new data available */
+  pos = ARRAY_LEN(usart_rx_dma_buffer) - huart2.hdmarx->Instance->CNDTR;          // LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_1);
+  if (pos != old_pos)                       /* Check change in received data */
+  {
+    if (pos > old_pos)                     /* Current position is over previous one */
+    {
+      /*
+        * Processing is done in "linear" mode.
+        *
+        * Application processing is fast with single data block,
+        * length is simply calculated by subtracting pointers
+        *
+        * [   0   ]
+        * [   1   ] <- old_pos |------------------------------------|
+        * [   2   ]            |                                    |
+        * [   3   ]            | Single block (len = pos - old_pos) |
+        * [   4   ]            |                                    |
+        * [   5   ]            |------------------------------------|
+        * [   6   ] <- pos
+        * [   7   ]
+        * [ N - 1 ]
+        */
+      usart_process_data(&usart_rx_dma_buffer[old_pos], pos - old_pos);
+    }
+    else
+    {
+      /*
+        * Processing is done in "overflow" mode..
+        *
+        * Application must process data twice,
+        * since there are 2 linear memory blocks to handle
+        *
+        * [   0   ]            |---------------------------------|
+        * [   1   ]            | Second block (len = pos)        |
+        * [   2   ]            |---------------------------------|
+        * [   3   ] <- pos
+        * [   4   ] <- old_pos |---------------------------------|
+        * [   5   ]            |                                 |
+        * [   6   ]            | First block (len = N - old_pos) |
+        * [   7   ]            |                                 |
+        * [ N - 1 ]            |---------------------------------|
+        */
+      usart_process_data(&usart_rx_dma_buffer[old_pos], ARRAY_LEN(usart_rx_dma_buffer) - old_pos);
+      if (pos > 0) 
+      {
+        usart_process_data(&usart_rx_dma_buffer[0], pos);
+      }
+    }
+    old_pos = pos;                          /* Save current position as old for next transfers */
+  }
+}
+
 
 
 /* USER CODE END 0 */
@@ -219,14 +326,22 @@ int main(void)
 
   /* Initialize ringbuff */
   lwrb_init(&usart_tx_rb, usart_tx_rb_data, sizeof(usart_tx_rb_data));
+  lwrb_init(&usart_rx_rb, usart_rx_rb_data, sizeof(usart_rx_rb_data));
 
   HAL_ADC_Start_DMA(&hadc, (uint32_t*)adcBuffer, 3);
 
-  HAL_UARTEx_ReceiveToIdle_DMA(&huart2, usart_rx_dma_buffer, sizeof(usart_rx_dma_buffer));
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_IDLE);
+//  __HAL_UART_CLEAR_IT(&huart2, USART_ICR_IDLECF);
+  HAL_UART_Receive_DMA(&huart2, usart_rx_dma_buffer, sizeof(usart_rx_dma_buffer));
+//  __HAL_UART_CLEAR_IT(&huart2, USART_ICR_IDLECF);
+
+  // __HAL_UART_ENABLE_IT(&huart2, UART_IT_IDLE);
+
+  // HAL_UARTEx_ReceiveToIdle_DMA(&huart2, usart_rx_dma_buffer, sizeof(usart_rx_dma_buffer));
 
   printf("Hello World!\n");
 
-  usart_send_string("String from STM32 DMA\n");
+  // usart_send_string("String from STM32 DMA\n");
 
   /* USER CODE END 2 */
 
