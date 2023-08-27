@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include "stdio_impl.h"
 #include "lwrb.h"
+#include "proto.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +65,8 @@ uint8_t usart_rx_rb_data[128];
 
 uint8_t usart_rx_dma_buffer[32];
 
+static uint32_t regs[0x40];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -76,7 +79,7 @@ static void MX_USART2_UART_Init(void);
 
 /* USER CODE BEGIN PFP */
 size_t usart_send_buff(const char* str, size_t len);
-void usart_rx_check(void);
+int usart_rx_check(void);
 uint8_t usart_start_tx_dma_transfer(void);
 
 /* USER CODE END PFP */
@@ -116,12 +119,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if(__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE))  // Check if it is an "Idle Interrupt"
   {									
-    size_t   len;
-    uint8_t* ptr;
+//    size_t   len;
+//    uint8_t* ptr;
 
     __HAL_UART_CLEAR_IT(huart, USART_ICR_IDLECF);
     usart_rx_check();
-
+#if 0
     // RX completed, we can start TX
     if(usart_tx_dma_current_len == 0)
     {
@@ -134,6 +137,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       } while(len);
       usart_start_tx_dma_transfer();             /* Then try to start transfer */
     }
+#endif    
   }
   else
   {
@@ -222,15 +226,13 @@ void usart_process_data(const uint8_t* data, size_t len)
 {
   // Process incoming data on the fly or copy to somewhere for future processing...
   size_t rc = lwrb_write(&usart_rx_rb, data, len);
-
-  // Remove me!
-  //++dma_n;
+  if(rc != len) printf("usart_process_data: RX overflow!");
 }
 
-void usart_rx_check(void) 
+int usart_rx_check(void) 
 {
   static size_t old_pos = 0;
-  size_t pos;
+  size_t pos, len = 0;
 
   /* Calculate current position in buffer and check for new data available */
   pos = ARRAY_LEN(usart_rx_dma_buffer) - huart2.hdmarx->Instance->CNDTR;          // LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_1);
@@ -254,7 +256,8 @@ void usart_rx_check(void)
         * [   7   ]
         * [ N - 1 ]
         */
-      usart_process_data(&usart_rx_dma_buffer[old_pos], pos - old_pos);
+      len = pos - old_pos;
+      usart_process_data(&usart_rx_dma_buffer[old_pos], len);
     }
     else
     {
@@ -274,16 +277,149 @@ void usart_rx_check(void)
         * [   7   ]            |                                 |
         * [ N - 1 ]            |---------------------------------|
         */
-      usart_process_data(&usart_rx_dma_buffer[old_pos], ARRAY_LEN(usart_rx_dma_buffer) - old_pos);
+      len = ARRAY_LEN(usart_rx_dma_buffer) - old_pos;
+      usart_process_data(&usart_rx_dma_buffer[old_pos], len);
       if (pos > 0) 
       {
+        len += pos;
         usart_process_data(&usart_rx_dma_buffer[0], pos);
       }
     }
     old_pos = pos;                          /* Save current position as old for next transfers */
   }
+  return len;
 }
 
+void process_pkt(packet_t* pkt, int id)
+{
+	uint8_t tx[sizeof(packet_t)+MAX_DATA_LEN+2] = {
+			SOP_485_CODE0, SOP_485_CODE1, SOP_485_CODE2, SOP_485_CODE3,
+			pkt->src, (uint8_t)(id&0xFF)/*from*/, 1, 0, 0 };
+	packet_t* p = NULL;
+	uint8_t i, len = 0;
+	uint16_t addr = 0;
+	
+	// printf("process_pkt()\n");
+	
+	switch(pkt->cmd)
+	{
+		case CMD_485_PING:
+			p = (packet_t*)tx;
+			p->len = 0;
+			p->cmd = 0x80 | CMD_485_PING;
+			break;
+		case CMD_485_REG_READ8:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			if(addr < sizeof(regs))
+			{
+				p = (packet_t*)tx;
+				p->len = 1;
+				p->cmd = 0x80 | CMD_485_REG_READ8;
+				p->data[0] = regs[addr];
+			}
+			break;
+		}
+		case CMD_485_REG_READ16:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			if(addr+1 < sizeof(regs))
+			{
+				p = (packet_t*)tx;
+				p->len = 2;
+				p->cmd = 0x80 | CMD_485_REG_READ16;
+				p->data[0] = regs[addr];
+				p->data[1] = regs[addr+1];
+			}
+			break;
+		}
+		case CMD_485_REG_READ32:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			if(addr+3 < sizeof(regs))
+			{
+				p = (packet_t*)tx;
+				p->len = 4;
+				p->cmd = 0x80 | CMD_485_REG_READ16;
+				p->data[0] = regs[addr];
+				p->data[1] = regs[addr+1];
+				p->data[2] = regs[addr+2];
+				p->data[3] = regs[addr+3];
+			}
+			break;
+		}
+		case CMD_485_DATA_READ:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			len = pkt->data[2];
+			if(len && addr+len-1 < sizeof(regs))
+			{
+				p = (packet_t*)tx;
+				p->len = len;
+				p->cmd = 0x80 | CMD_485_DATA_READ;
+				for(i = 0; i < len; ++i) p->data[i] = regs[addr+i];
+			}
+			break;
+		}
+		case CMD_485_REG_WRITE8:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			if(addr < sizeof(regs))
+			{
+				regs[addr] = pkt->data[2];
+				p = (packet_t*)tx;
+				p->len = 0;
+				p->cmd = 0x80 | CMD_485_REG_WRITE8;
+			}
+			break;
+		}
+		case CMD_485_REG_WRITE16:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			if(addr+1 < sizeof(regs))
+			{
+				regs[addr] = pkt->data[2];
+				regs[addr+1] = pkt->data[3];
+				p = (packet_t*)tx;
+				p->len = 0;
+				p->cmd = 0x80 | CMD_485_REG_WRITE16;
+			}
+			break;
+		}
+		case CMD_485_REG_WRITE32:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			if(addr+3 < sizeof(regs))
+			{
+				regs[addr] = pkt->data[2];
+				regs[addr+1] = pkt->data[3];
+				regs[addr+2] = pkt->data[4];
+				regs[addr+3] = pkt->data[5];
+				p = (packet_t*)tx;
+				p->len = 0;
+				p->cmd = 0x80 | CMD_485_REG_WRITE32;
+			}
+			break;
+		}
+		case CMD_485_DATA_WRITE:
+		{
+			addr = pkt->data[0] | (pkt->data[1]<<8);
+			len = pkt->data[2];
+			if(len && addr+len-1 < sizeof(regs))
+			{
+				for(i=0; i < len; ++i) regs[addr+i] = pkt->data[3+i];
+				p = (packet_t*)tx;
+				p->len = 0;
+				p->cmd = 0x80 | CMD_485_DATA_WRITE;
+			}
+			break;
+		}
+			
+		default:
+			break;
+	}
+	if(p) proto_tx(&usart_tx_rb, p);
+}
 
 
 /* USER CODE END 0 */
@@ -328,6 +464,8 @@ int main(void)
   lwrb_init(&usart_tx_rb, usart_tx_rb_data, sizeof(usart_tx_rb_data));
   lwrb_init(&usart_rx_rb, usart_rx_rb_data, sizeof(usart_rx_rb_data));
 
+  proto_init(0, &usart_rx_rb);
+
   HAL_ADC_Start_DMA(&hadc, (uint32_t*)adcBuffer, 3);
 
   __HAL_UART_ENABLE_IT(&huart2, UART_IT_IDLE);
@@ -350,6 +488,16 @@ int main(void)
   t1 = HAL_GetTick() + 1000;
   while (1)
   {
+    packet_t* pkt;
+
+    pkt = proto_poll(0);
+    if(pkt)
+    {
+      process_pkt(pkt, 2);
+      ++dma_n;
+    }
+    usart_start_tx_dma_transfer();
+
     t = HAL_GetTick();
     if(t1 < t)
     {
@@ -358,6 +506,7 @@ int main(void)
       // regs.adc_lum = dma_lum /dma_n;
       // dma_lum = 0;
       // dma_n = 0;
+
 
 
     }
@@ -543,6 +692,8 @@ static void MX_USART2_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
+
+  // TODO: Set RX timeout ???
 
   /* USER CODE END USART2_Init 2 */
 

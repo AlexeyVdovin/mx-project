@@ -38,6 +38,7 @@ BUILD_DIR = build
 C_SOURCES =  \
 Src/main.c \
 Src/lwrb.c \
+SRC/proto.c \
 Src/stdio_impl.c \
 Src/stm32f0xx_it.c \
 Src/stm32f0xx_hal_msp.c \
