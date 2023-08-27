@@ -34,6 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define NODE_ID 2
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -65,7 +66,7 @@ uint8_t usart_rx_rb_data[128];
 
 uint8_t usart_rx_dma_buffer[32];
 
-static uint32_t regs[0x40];
+static uint8_t regs[0x100];
 
 /* USER CODE END PV */
 
@@ -338,6 +339,11 @@ void process_pkt(packet_t* pkt, int id)
 			addr = pkt->data[0] | (pkt->data[1]<<8);
 			if(addr+3 < sizeof(regs))
 			{
+        if(addr == 0)
+        {
+          uint32_t t = HAL_GetTick();
+          *(uint32_t*)regs = t;
+        }
 				p = (packet_t*)tx;
 				p->len = 4;
 				p->cmd = 0x80 | CMD_485_REG_READ16;
@@ -352,7 +358,7 @@ void process_pkt(packet_t* pkt, int id)
 		{
 			addr = pkt->data[0] | (pkt->data[1]<<8);
 			len = pkt->data[2];
-			if(len && addr+len-1 < sizeof(regs))
+			if(len && addr+len-1 < sizeof(regs) && len < MAX_DATA_LEN)
 			{
 				p = (packet_t*)tx;
 				p->len = len;
@@ -491,9 +497,9 @@ int main(void)
     packet_t* pkt;
 
     pkt = proto_poll(0);
-    if(pkt)
+    if(pkt && pkt->src != NODE_ID && pkt->dst == NODE_ID)
     {
-      process_pkt(pkt, 2);
+      process_pkt(pkt, NODE_ID);
       ++dma_n;
     }
     usart_start_tx_dma_transfer();
