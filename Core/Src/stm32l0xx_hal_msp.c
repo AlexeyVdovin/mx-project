@@ -7,7 +7,7 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2023 STMicroelectronics.
+  * Copyright (c) 2024 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -20,9 +20,11 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+
 /* USER CODE BEGIN Includes */
 
 /* USER CODE END Includes */
+extern DMA_HandleTypeDef hdma_lpuart1_tx;
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
@@ -105,6 +107,9 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
 
     /* Peripheral clock enable */
     __HAL_RCC_I2C1_CLK_ENABLE();
+    /* I2C1 interrupt Init */
+    HAL_NVIC_SetPriority(I2C1_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(I2C1_IRQn);
   /* USER CODE BEGIN I2C1_MspInit 1 */
 
   /* USER CODE END I2C1_MspInit 1 */
@@ -136,6 +141,8 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
 
     HAL_GPIO_DeInit(SDA_GPIO_Port, SDA_Pin);
 
+    /* I2C1 interrupt DeInit */
+    HAL_NVIC_DisableIRQ(I2C1_IRQn);
   /* USER CODE BEGIN I2C1_MspDeInit 1 */
 
   /* USER CODE END I2C1_MspDeInit 1 */
@@ -162,15 +169,32 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**LPUART1 GPIO Configuration
-    PA0-CK_IN     ------> LPUART1_RX
-    PA1     ------> LPUART1_TX
+    PA4     ------> LPUART1_TX
     */
-    GPIO_InitStruct.Pin = DBG_RX_Pin|DBG_TX_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pin = DBG_TX_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF6_LPUART1;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    HAL_GPIO_Init(DBG_TX_GPIO_Port, &GPIO_InitStruct);
+
+    /* LPUART1 DMA Init */
+    /* LPUART1_TX Init */
+    hdma_lpuart1_tx.Instance = DMA1_Channel2;
+    hdma_lpuart1_tx.Init.Request = DMA_REQUEST_5;
+    hdma_lpuart1_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
+    hdma_lpuart1_tx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_lpuart1_tx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_lpuart1_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_lpuart1_tx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_lpuart1_tx.Init.Mode = DMA_NORMAL;
+    hdma_lpuart1_tx.Init.Priority = DMA_PRIORITY_LOW;
+    if (HAL_DMA_Init(&hdma_lpuart1_tx) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    __HAL_LINKDMA(huart,hdmatx,hdma_lpuart1_tx);
 
   /* USER CODE BEGIN LPUART1_MspInit 1 */
 
@@ -196,11 +220,12 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
     __HAL_RCC_LPUART1_CLK_DISABLE();
 
     /**LPUART1 GPIO Configuration
-    PA0-CK_IN     ------> LPUART1_RX
-    PA1     ------> LPUART1_TX
+    PA4     ------> LPUART1_TX
     */
-    HAL_GPIO_DeInit(GPIOA, DBG_RX_Pin|DBG_TX_Pin);
+    HAL_GPIO_DeInit(DBG_TX_GPIO_Port, DBG_TX_Pin);
 
+    /* LPUART1 DMA DeInit */
+    HAL_DMA_DeInit(huart->hdmatx);
   /* USER CODE BEGIN LPUART1_MspDeInit 1 */
 
   /* USER CODE END LPUART1_MspDeInit 1 */
@@ -227,14 +252,14 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* htim_base)
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**TIM2 GPIO Configuration
-    PA4     ------> TIM2_ETR
+    PA0-CK_IN     ------> TIM2_ETR
     */
-    GPIO_InitStruct.Pin = CF_Pin;
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF5_TIM2;
-    HAL_GPIO_Init(CF_GPIO_Port, &GPIO_InitStruct);
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN TIM2_MspInit 1 */
 
@@ -250,14 +275,14 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* htim_base)
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**TIM21 GPIO Configuration
-    PA7     ------> TIM21_ETR
+    PA1     ------> TIM21_ETR
     */
-    GPIO_InitStruct.Pin = CF1_Pin;
+    GPIO_InitStruct.Pin = GPIO_PIN_1;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF5_TIM21;
-    HAL_GPIO_Init(CF1_GPIO_Port, &GPIO_InitStruct);
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN TIM21_MspInit 1 */
 
@@ -283,9 +308,9 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* htim_base)
     __HAL_RCC_TIM2_CLK_DISABLE();
 
     /**TIM2 GPIO Configuration
-    PA4     ------> TIM2_ETR
+    PA0-CK_IN     ------> TIM2_ETR
     */
-    HAL_GPIO_DeInit(CF_GPIO_Port, CF_Pin);
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0);
 
   /* USER CODE BEGIN TIM2_MspDeInit 1 */
 
@@ -300,9 +325,9 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* htim_base)
     __HAL_RCC_TIM21_CLK_DISABLE();
 
     /**TIM21 GPIO Configuration
-    PA7     ------> TIM21_ETR
+    PA1     ------> TIM21_ETR
     */
-    HAL_GPIO_DeInit(CF1_GPIO_Port, CF1_Pin);
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_1);
 
   /* USER CODE BEGIN TIM21_MspDeInit 1 */
 
@@ -314,4 +339,3 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* htim_base)
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
-
