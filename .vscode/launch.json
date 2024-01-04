@@ -8,10 +8,10 @@
             "request": "launch",
             "type": "cortex-debug",
             "servertype": "openocd",
-            "svdFile": "./stm2l0x1.svd",
+            "svdFile": "./stm32l0x1.svd",
             "configFiles": [
                 "interface/stlink-v2.cfg",
-                "target/stm32f0x.cfg"
+                "target/stm32l0.cfg"
             ]
         }
     ]

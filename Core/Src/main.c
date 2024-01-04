@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "lwrb.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -45,6 +46,15 @@ typedef struct
   float     voltage_k;
 } CFG_T;
 
+enum
+{
+  EE_ADDR_BASE  = DATA_EEPROM_BASE,
+  EE_I2C_ADDR   = DATA_EEPROM_BASE + 0x04, //  8 bit
+  EE_ENERGY_K   = DATA_EEPROM_BASE + 0x08, // 32 bit
+  EE_POWER_K    = DATA_EEPROM_BASE + 0x0C, // 16 bit
+  EE_VOLTAGE_K  = DATA_EEPROM_BASE + 0x0E  // 16 bit
+};
+
 
 /* USER CODE END PTD */
 
@@ -52,11 +62,9 @@ typedef struct
 /* USER CODE BEGIN PD */
 
 #define DEFAULT_I2C_ADDR  0x6E
-
-#define EE_I2C_ADDR   0x0004
-#define EE_ENERGY_K   0x0008
-#define EE_POWER_K    0x000C
-#define EE_VOLTAGE_K  0x000E
+#define DEFAULT_ENERGY_K  1
+#define DEFAULT_POWER_K   1
+#define DEFAULT_VOLTAGE_K 1
 
 /* USER CODE END PD */
 
@@ -75,16 +83,17 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim21;
 
 /* USER CODE BEGIN PV */
-volatile REGS_T reg;
+lwrb_t usart_tx_rb;
+//uint8_t usart_tx_rb_data[64];
+volatile size_t usart_tx_dma_current_len;
+volatile uint16_t dma_n = 0;
+
+// volatile REGS_T reg;
 CFG_T           cfg;
 
 volatile uint8_t cn_flag = 0;
 volatile uint16_t cn_power = 0;
 volatile uint16_t cn_voltage = 0;
-
-uint64_t total_energy;
-uint16_t current_power;
-uint16_t current_voltage;
 
 /* USER CODE END PV */
 
@@ -97,11 +106,121 @@ static void MX_LPUART1_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM21_Init(void);
 /* USER CODE BEGIN PFP */
+size_t usart_send_buff(const char* str, size_t len);
+uint8_t usart_start_tx_dma_transfer(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if 0
+void unlock_EE()
+{
+  HAL_FLASHEx_DATAEEPROM_Unlock()
+  
+  /* (1) Wait till no operation is on going */
+  /* (2) Check if the PELOCK is unlocked */
+  /* (3) Perform unlock sequence */
+  while((FLASH->SR & FLASH_SR_BSY) != 0) /* (1) */
+  {
+    /* For robust implementation, add here time-out management */
+  }
+  if((FLASH->PECR & FLASH_PECR_PELOCK) != 0) /* (2) */
+  {
+    FLASH->PEKEYR = FLASH_PEKEY1; /* (3) */
+    FLASH->PEKEYR = FLASH_PEKEY2;
+  }
+}
+
+void lock_EE()
+{
+  /* (1) Wait till no operation is on going */
+  /* (2) Locks the NVM by setting PELOCK in PECR */
+  while((FLASH->SR & FLASH_SR_BSY) != 0) /* (1) */
+  {
+    /* For robust implementation, add here time-out management */
+  }
+  FLASH->PECR |= FLASH_PECR_PELOCK; /* (2) */
+}
+#endif
+
+uint32_t read_EE(uint32_t addr)
+{
+  assert_param(IS_FLASH_DATA_ADDRESS(addr));
+  return *(uint32_t*)addr;
+}
+
+void HAL_UART_TxHalfCpltCallback(UART_HandleTypeDef *huart)
+{
+  // Remove me!
+  ++dma_n;
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  lwrb_skip(&usart_tx_rb, usart_tx_dma_current_len);/* Skip buffer, it has been successfully sent out */
+  usart_tx_dma_current_len = 0;           /* Reset data length */
+  usart_start_tx_dma_transfer();          /* Start new transfer */
+
+  // Remove me!
+  // ++dma_n;
+}
+
+uint8_t usart_start_tx_dma_transfer(void) 
+{
+  uint8_t started = 0;
+  uint8_t* ptr;
+
+  /*
+    * First check if transfer is currently in-active,
+    * by examining the value of usart_tx_dma_current_len variable.
+    *
+    * This variable is set before DMA transfer is started and cleared in DMA TX complete interrupt.
+    *
+    * It is not necessary to disable the interrupts before checking the variable:
+    *
+    * When usart_tx_dma_current_len == 0
+    *    - This function is called by either application or TX DMA interrupt
+    *    - When called from interrupt, it was just reset before the call,
+    *         indicating transfer just completed and ready for more
+    *    - When called from an application, transfer was previously already in-active
+    *         and immediate call from interrupt cannot happen at this moment
+    *
+    * When usart_tx_dma_current_len != 0
+    *    - This function is called only by an application.
+    *    - It will never be called from interrupt with usart_tx_dma_current_len != 0 condition
+    *
+    * Disabling interrupts before checking for next transfer is advised
+    * only if multiple operating system threads can access to this function w/o
+    * exclusive access protection (mutex) configured,
+    * or if application calls this function from multiple interrupts.
+    *
+    * This example assumes worst use case scenario,
+    * hence interrupts are disabled prior every check
+    */
+  if (usart_tx_dma_current_len == 0 && (usart_tx_dma_current_len = lwrb_get_linear_block_read_length(&usart_tx_rb)) > 0) 
+  {
+    ptr = lwrb_get_linear_block_read_address(&usart_tx_rb);
+    HAL_UART_Transmit_DMA(&hlpuart1, ptr, usart_tx_dma_current_len);
+    started = 1;
+  }
+
+  return started;
+}
+
+size_t usart_send_string(const char* str) 
+{
+    size_t rc = lwrb_write(&usart_tx_rb, str, strlen(str)); /* Write data to TX buffer for loopback */
+    usart_start_tx_dma_transfer();              /* Then try to start transfer */
+    return rc;
+}
+
+size_t usart_send_buff(const char* str, size_t len) 
+{
+    size_t rc = lwrb_write(&usart_tx_rb, str, len); /* Write data to TX buffer for loopback */
+    usart_start_tx_dma_transfer();                   /* Then try to start transfer */
+    return rc;
+}
 
 /* USER CODE END 0 */
 
@@ -129,6 +248,20 @@ int main(void)
 
   /* USER CODE BEGIN SysInit */
 
+  cfg.addr = read_EE(EE_I2C_ADDR); if(cfg.addr < 0x10 || cfg.addr > 0x7F) cfg.addr = DEFAULT_I2C_ADDR;
+  if(cfg.addr != DEFAULT_I2C_ADDR)
+  {
+    cfg.energy_k  = read_EE(EE_ENERGY_K);
+    cfg.power_k   = read_EE(EE_POWER_K);
+    cfg.voltage_k = read_EE(EE_VOLTAGE_K);
+  }
+  else
+  {
+    cfg.energy_k  = DEFAULT_ENERGY_K;
+    cfg.power_k   = DEFAULT_POWER_K;
+    cfg.voltage_k = DEFAULT_VOLTAGE_K;
+  }
+
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -144,6 +277,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  // HAL_FLASH_Program()
   while (1)
   {
     /* USER CODE END WHILE */
@@ -221,7 +355,7 @@ static void MX_I2C1_Init(void)
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.Timing = 0x00000509;
-  hi2c1.Init.OwnAddress1 = 192;
+  hi2c1.Init.OwnAddress1 = cfg.addr;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c1.Init.OwnAddress2 = 0;
