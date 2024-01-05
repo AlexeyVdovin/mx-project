@@ -305,6 +305,9 @@ int main(void)
   // MX_TIM21_Init();
   /* USER CODE BEGIN 2 */
 
+  /* SysTick interrupt Init */
+  LL_SYSTICK_EnableIT();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -312,7 +315,6 @@ int main(void)
   // HAL_FLASH_Program()
   while (1)
   {
-    static const uint32_t dummy = 0xCAFEBABE;
     static const char str[] = "abc\n";
 
     // delay(100000);
@@ -343,7 +345,6 @@ void SystemClock_Config(void)
   while (LL_PWR_IsActiveFlag_VOS() != 0)
   {
   }
-  LL_RCC_HSI_EnableDivider();
   LL_RCC_HSI_Enable();
 
    /* Wait till HSI is ready */
@@ -371,11 +372,9 @@ void SystemClock_Config(void)
 
   }
 
-  LL_Init1msTick(4000000);
-/* SysTick interrupt Init */
-  LL_SYSTICK_EnableIT();
+  LL_Init1msTick(16000000);
 
-  LL_SetSystemCoreClock(4000000);
+  LL_SetSystemCoreClock(16000000);
   LL_RCC_SetLPUARTClockSource(LL_RCC_LPUART1_CLKSOURCE_PCLK1);
   LL_RCC_SetI2CClockSource(LL_RCC_I2C1_CLKSOURCE_PCLK1);
 }
@@ -435,7 +434,7 @@ static void MX_I2C1_Init(void)
   LL_I2C_DisableGeneralCall(I2C1);
   LL_I2C_EnableClockStretching(I2C1);
   I2C_InitStruct.PeripheralMode = LL_I2C_MODE_I2C;
-  I2C_InitStruct.Timing = 0x00000509;
+  I2C_InitStruct.Timing = 0x2000090E;
   I2C_InitStruct.AnalogFilter = LL_I2C_ANALOGFILTER_ENABLE;
   I2C_InitStruct.DigitalFilter = 0;
   I2C_InitStruct.OwnAddress1 = 192;
@@ -500,9 +499,8 @@ static void MX_LPUART1_UART_Init(void)
   LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MDATAALIGN_BYTE);
 
   /* USER CODE BEGIN LPUART1_Init 1 */
-
+  LL_LPUART_Disable(LPUART1);
   /* USER CODE END LPUART1_Init 1 */
-LL_LPUART_Disable(LPUART1);
   LPUART_InitStruct.BaudRate = 115200;
   LPUART_InitStruct.DataWidth = LL_LPUART_DATAWIDTH_8B;
   LPUART_InitStruct.StopBits = LL_LPUART_STOPBITS_1;
@@ -512,12 +510,12 @@ LL_LPUART_Disable(LPUART1);
   LL_LPUART_EnableHalfDuplex(LPUART1);
   LL_LPUART_DisableRTSHWFlowCtrl(LPUART1);
   LL_LPUART_DisableIT_CTS(LPUART1);
-    LL_LPUART_DisableIT_ERROR(LPUART1);
+  LL_LPUART_EnableCTSHWFlowCtrl(LPUART1);
+  LL_LPUART_DisableIT_ERROR(LPUART1);
   LL_LPUART_DisableCTSHWFlowCtrl(LPUART1);
-  LL_LPUART_Enable(LPUART1);
-  // LL_LPUART_IsActiveFlag_CTS(LPUART1);
+  LL_LPUART_IsActiveFlag_CTS(LPUART1);
   /* USER CODE BEGIN LPUART1_Init 2 */
-
+  LL_LPUART_Enable(LPUART1);
   /* USER CODE END LPUART1_Init 2 */
 
 }
