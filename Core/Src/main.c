@@ -228,30 +228,15 @@ void delay(int dly)
   while( c--);
 }
 
-void LPUART_DMA_TX(uint8_t* data, uint8_t size)
-{
-  LL_LPUART_DisableDMAReq_TX(LPUART1); // Disable DMA requests from LPUART
-  LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_2); // Disable DMA channel
-  LL_DMA_SetPeriphAddress(DMA1, LL_DMA_CHANNEL_2, (uint32_t)&LPUART1->TDR);
-  while (DMA1_Channel2->CCR & 0x01) // While EN bit is high
-    __NOP(); // Wait for disable to finish
-  LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, size);
-  LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_2, (uint32_t)data); // Set source address
-  LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PRIORITY_LOW);
-  LL_DMA_ClearFlag_GI2(DMA1); // Clear global interrupt flag for channel 2
-  LL_DMA_ClearFlag_TC2(DMA1);
-  LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_2); // Enable transfer complete interrupt
-  LL_DMA_EnableIT_TE(DMA1, LL_DMA_CHANNEL_2);
-  LL_LPUART_EnableDMAReq_TX(LPUART1); // Enable DMA requests
-  LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_2); // Enable channel
-  LL_LPUART_ClearFlag_TC(LPUART1);
-}
-
 void DMA_TransmitData(uint8_t* data, uint8_t size)
 {
   LL_LPUART_DisableDMAReq_TX(LPUART1);
   LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_2);
-  LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_2, (uint32_t)&data, LL_LPUART_DMA_GetRegAddr(LPUART1, LL_LPUART_DMA_REG_DATA_TRANSMIT), LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+#if 0  
+  while (DMA1_Channel2->CCR & 0x01) // While EN bit is high
+    __NOP(); // Wait for disable to finish
+#endif
+  LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_2, (uint32_t)data, LL_LPUART_DMA_GetRegAddr(LPUART1, LL_LPUART_DMA_REG_DATA_TRANSMIT), LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
   LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, size);
   LL_DMA_ClearFlag_GI2(DMA1);
   LL_DMA_ClearFlag_HT2(DMA1);
@@ -314,10 +299,10 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-// MX_I2C1_Init();
+  // MX_I2C1_Init();
   MX_LPUART1_UART_Init();
-// MX_TIM2_Init();
-// MX_TIM21_Init();
+  // MX_TIM2_Init();
+  // MX_TIM21_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -327,13 +312,14 @@ int main(void)
   // HAL_FLASH_Program()
   while (1)
   {
+    static const uint32_t dummy = 0xCAFEBABE;
     static const char str[] = "abc\n";
+
     // delay(100000);
     if(t1 < tick)
     {
       t1 = tick + 500;
       LL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-      // LPUART_DMA_TX(str, 4);
       DMA_TransmitData(str, 4);
     }
     /* USER CODE END WHILE */
@@ -366,23 +352,31 @@ void SystemClock_Config(void)
 
   }
   LL_RCC_HSI_SetCalibTrimming(16);
+  LL_RCC_PLL_ConfigDomain_SYS(LL_RCC_PLLSOURCE_HSI, LL_RCC_PLL_MUL_4, LL_RCC_PLL_DIV_4);
+  LL_RCC_PLL_Enable();
+
+   /* Wait till PLL is ready */
+  while(LL_RCC_PLL_IsReady() != 1)
+  {
+
+  }
   LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
   LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_2);
   LL_RCC_SetAPB2Prescaler(LL_RCC_APB2_DIV_2);
-  LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_HSI);
+  LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_PLL);
 
    /* Wait till System clock is ready */
-  while(LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_HSI)
+  while(LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_PLL)
   {
 
   }
 
   LL_Init1msTick(4000000);
-  /* SysTick interrupt Init */
+/* SysTick interrupt Init */
   LL_SYSTICK_EnableIT();
 
   LL_SetSystemCoreClock(4000000);
-  LL_RCC_SetLPUARTClockSource(LL_RCC_LPUART1_CLKSOURCE_HSI);
+  LL_RCC_SetLPUARTClockSource(LL_RCC_LPUART1_CLKSOURCE_PCLK1);
   LL_RCC_SetI2CClockSource(LL_RCC_I2C1_CLKSOURCE_PCLK1);
 }
 
@@ -490,18 +484,25 @@ static void MX_LPUART1_UART_Init(void)
 
   /* LPUART1_TX Init */
   LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_2, LL_DMA_REQUEST_5);
+
   LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_2, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+
   LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PRIORITY_LOW);
+
   LL_DMA_SetMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MODE_NORMAL);
+
   LL_DMA_SetPeriphIncMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PERIPH_NOINCREMENT);
+
   LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MEMORY_INCREMENT);
+
   LL_DMA_SetPeriphSize(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PDATAALIGN_BYTE);
+
   LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MDATAALIGN_BYTE);
 
   /* USER CODE BEGIN LPUART1_Init 1 */
 
   /* USER CODE END LPUART1_Init 1 */
-  LL_LPUART_Disable(LPUART1);
+LL_LPUART_Disable(LPUART1);
   LPUART_InitStruct.BaudRate = 115200;
   LPUART_InitStruct.DataWidth = LL_LPUART_DATAWIDTH_8B;
   LPUART_InitStruct.StopBits = LL_LPUART_STOPBITS_1;
@@ -511,7 +512,7 @@ static void MX_LPUART1_UART_Init(void)
   LL_LPUART_EnableHalfDuplex(LPUART1);
   LL_LPUART_DisableRTSHWFlowCtrl(LPUART1);
   LL_LPUART_DisableIT_CTS(LPUART1);
-  LL_LPUART_DisableIT_ERROR(LPUART1);
+    LL_LPUART_DisableIT_ERROR(LPUART1);
   LL_LPUART_DisableCTSHWFlowCtrl(LPUART1);
   LL_LPUART_Enable(LPUART1);
   // LL_LPUART_IsActiveFlag_CTS(LPUART1);
