@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 #include "lwrb.h"
 
 /* USER CODE END Includes */
@@ -30,12 +31,14 @@
 
 typedef struct
 {
-  uint32_t tick;
-  uint16_t status;
-  uint16_t control;
-  uint64_t energy;    // in watts/minute
-  uint16_t power;     // in 1/10 watt
-  uint16_t voltage;   // in 1/10 volt
+  uint32_t tick;      // 0
+  uint16_t status;    // 4
+  uint16_t control;   // 6
+  uint64_t energy;    // 8  - in watts/minute
+  uint16_t power;     // 16 - in watts
+  uint16_t voltage;   // 18 - in volts
+  uint32_t addr;      // 20
+  uint32_t data;      // 24
 } REGS_T;
 
 typedef struct
@@ -61,9 +64,9 @@ enum
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define DEFAULT_I2C_ADDR  0x6E
+#define DEFAULT_I2C_ADDR  (0x6E*2)
 #define DEFAULT_ENERGY_K  1
-#define DEFAULT_POWER_K   1
+#define DEFAULT_POWER_K   0.5
 #define DEFAULT_VOLTAGE_K 1
 
 /* USER CODE END PD */
@@ -76,7 +79,8 @@ enum
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-volatile uint64_t tick = 0;
+volatile uint32_t tick = 0;
+volatile uint32_t i2c_wd = 0;
 
 lwrb_t usart_tx_rb;
 uint8_t usart_tx_rb_data[128];
@@ -85,14 +89,18 @@ volatile uint16_t dma_n = 0;
 
 volatile REGS_T reg;
 CFG_T           cfg;
+uint8_t reg_addr = 0;
 
 volatile uint8_t cn_flag = 0;
+volatile uint16_t cn_mul = 0;
 volatile uint16_t cn_power = 0;
 volatile uint16_t cn_voltage = 0;
+uint16_t cn_pwr[] = {0,0};
+uint8_t  cn_pwr_i = 0;
 
 uint64_t total_energy;      // in watts/minute
-uint16_t current_power;     // in 1/10 watt
-uint16_t current_voltage;   // in 1/10 volt
+uint16_t current_power;     // in watts
+uint16_t current_voltage;   // in volts
 
 /* USER CODE END PV */
 
@@ -107,7 +115,6 @@ static void MX_TIM21_Init(void);
 /* USER CODE BEGIN PFP */
 size_t usart_send_string(const char* str);
 size_t usart_send_buff(const char* str, size_t len);
-uint8_t usart_start_tx_dma_transfer(void);
 
 /* USER CODE END PFP */
 
@@ -150,20 +157,26 @@ uint32_t read_EE(uint32_t addr)
   return *(uint32_t*)addr;
 }
 
-void HAL_UART_TxHalfCpltCallback(void *huart)
+void DMA_TransmitData(uint8_t* data, uint8_t size)
 {
-  // Remove me!
-  ++dma_n;
-}
-
-void HAL_UART_TxCpltCallback(void *huart)
-{
-  lwrb_skip(&usart_tx_rb, usart_tx_dma_current_len);/* Skip buffer, it has been successfully sent out */
-  usart_tx_dma_current_len = 0;           /* Reset data length */
-  usart_start_tx_dma_transfer();          /* Start new transfer */
-
-  // Remove me!
-  // ++dma_n;
+  LL_LPUART_DisableDMAReq_TX(LPUART1);
+  LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_2);
+#if 0  
+  while (DMA1_Channel2->CCR & 0x01) // While EN bit is high
+    __NOP(); // Wait for disable to finish
+#endif
+  LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_2, (uint32_t)data, LL_LPUART_DMA_GetRegAddr(LPUART1, LL_LPUART_DMA_REG_DATA_TRANSMIT), LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
+  LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, size);
+  LL_DMA_ClearFlag_GI2(DMA1);
+  LL_DMA_ClearFlag_HT2(DMA1);
+  LL_DMA_ClearFlag_TC2(DMA1);
+  LL_DMA_ClearFlag_TE2(DMA1);
+  LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_2);
+  LL_DMA_EnableIT_HT(DMA1, LL_DMA_CHANNEL_2);
+  LL_DMA_EnableIT_TE(DMA1, LL_DMA_CHANNEL_2);
+  LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_2);
+  LL_LPUART_EnableDMAReq_TX(LPUART1);
+  LL_LPUART_ClearFlag_TC(LPUART1);
 }
 
 uint8_t usart_start_tx_dma_transfer(void) 
@@ -201,6 +214,7 @@ uint8_t usart_start_tx_dma_transfer(void)
   if (usart_tx_dma_current_len == 0 && (usart_tx_dma_current_len = lwrb_get_linear_block_read_length(&usart_tx_rb)) > 0) 
   {
     ptr = lwrb_get_linear_block_read_address(&usart_tx_rb);
+    DMA_TransmitData(ptr, usart_tx_dma_current_len);
     // FIX me !!! HAL_UART_Transmit_DMA(&hlpuart1, ptr, usart_tx_dma_current_len);
     started = 1;
   }
@@ -228,26 +242,46 @@ void delay(int dly)
   while( c--);
 }
 
-void DMA_TransmitData(uint8_t* data, uint8_t size)
+void LPUART_TxCpltCallback()
 {
-  LL_LPUART_DisableDMAReq_TX(LPUART1);
-  LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_2);
-#if 0  
-  while (DMA1_Channel2->CCR & 0x01) // While EN bit is high
-    __NOP(); // Wait for disable to finish
-#endif
-  LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_2, (uint32_t)data, LL_LPUART_DMA_GetRegAddr(LPUART1, LL_LPUART_DMA_REG_DATA_TRANSMIT), LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
-  LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_2, size);
-  LL_DMA_ClearFlag_GI2(DMA1);
-  LL_DMA_ClearFlag_HT2(DMA1);
-  LL_DMA_ClearFlag_TC2(DMA1);
-  LL_DMA_ClearFlag_TE2(DMA1);
-  LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_2);
-  LL_DMA_EnableIT_HT(DMA1, LL_DMA_CHANNEL_2);
-  LL_DMA_EnableIT_TE(DMA1, LL_DMA_CHANNEL_2);
-  LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_2);
-  LL_LPUART_EnableDMAReq_TX(LPUART1);
-  LL_LPUART_ClearFlag_TC(LPUART1);
+  lwrb_skip(&usart_tx_rb, usart_tx_dma_current_len);/* Skip buffer, it has been successfully sent out */
+  usart_tx_dma_current_len = 0;           /* Reset data length */
+  usart_start_tx_dma_transfer();          /* Start new transfer */
+}
+
+void I2C1_Reset()
+{
+  LL_I2C_Disable(I2C1);
+  LL_I2C_IsEnabled(I2C1);
+  LL_I2C_Enable(I2C1);
+}
+
+void I2C1_Slave_RX(uint8_t n, uint8_t data)
+{
+  uint8_t* p = (uint8_t*)(&reg);
+
+  if(n == 0) reg_addr = data;
+  else if(reg_addr >= 0 && reg_addr < sizeof(reg))
+  {
+    p[reg_addr++] = data;
+  }
+}
+
+uint8_t I2C1_Slave_TX()
+{
+  uint8_t data = 0xAE;
+  uint8_t* p = (uint8_t*)(&reg);
+
+  if(reg_addr == 0) reg.tick = tick;
+  else if(reg_addr == offsetof(REGS_T, energy)) reg.energy = total_energy;
+  else if(reg_addr == offsetof(REGS_T, power)) reg.power = current_power;
+  else if(reg_addr == offsetof(REGS_T, voltage)) reg.voltage = current_voltage;
+  
+  if(reg_addr >= 0 && reg_addr < sizeof(reg))
+  {
+    data = p[reg_addr++];
+  }
+  return data;
 }
 
 /* USER CODE END 0 */
@@ -259,7 +293,7 @@ void DMA_TransmitData(uint8_t* data, uint8_t size)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-  uint64_t t1 = 1000;
+  uint32_t t1 = 1000;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -279,7 +313,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-#if 0
+
   cfg.addr = read_EE(EE_I2C_ADDR); if(cfg.addr < 0x10 || cfg.addr > 0x7F) cfg.addr = DEFAULT_I2C_ADDR;
   if(cfg.addr != DEFAULT_I2C_ADDR)
   {
@@ -293,20 +327,22 @@ int main(void)
     cfg.power_k   = DEFAULT_POWER_K;
     cfg.voltage_k = DEFAULT_VOLTAGE_K;
   }
-#endif
+
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  // MX_I2C1_Init();
+  MX_I2C1_Init();
   MX_LPUART1_UART_Init();
-  // MX_TIM2_Init();
-  // MX_TIM21_Init();
+  MX_TIM2_Init();
+  MX_TIM21_Init();
   /* USER CODE BEGIN 2 */
 
-  /* SysTick interrupt Init */
   LL_SYSTICK_EnableIT();
+
+  /* Initialize ringbuff */
+  lwrb_init(&usart_tx_rb, usart_tx_rb_data, sizeof(usart_tx_rb_data));
 
   /* USER CODE END 2 */
 
@@ -315,14 +351,39 @@ int main(void)
   // HAL_FLASH_Program()
   while (1)
   {
-    static const char str[] = "abc\n";
+    if(cn_flag)
+    {
+      const int n = (sizeof(cn_pwr)/sizeof(cn_pwr[0]));
+      int i, p = 0;
+      cn_flag = 0;
+      total_energy += cn_power;
+      cn_pwr[cn_pwr_i] = cn_power;
+      for(i = 0; i < n; ++i) p += cn_pwr[i];
+      cn_pwr_i = (cn_pwr_i+1) % n;
+      current_power = (uint16_t)(cfg.power_k * p / n);
+      current_voltage = (uint16_t)(cfg.voltage_k * cn_voltage);
+    }
 
-    // delay(100000);
+    if(i2c_wd && i2c_wd < tick)
+    {
+      i2c_wd = 0;
+      I2C1_Reset();
+    }
+
+    // TODO: Add I2C comand processing
+
     if(t1 < tick)
     {
-      t1 = tick + 500;
+      char line[128];
+      int len;
+
+      t1 = tick + 1000;
       LL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-      DMA_TransmitData(str, 4);
+
+      len = sprintf(line, "V:%d\t P:%d\n", current_voltage, current_power);
+
+      // usart_send_buff(str, 4);
+      usart_send_buff(line, len);
     }
     /* USER CODE END WHILE */
 
@@ -404,7 +465,7 @@ static void MX_I2C1_Init(void)
   GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_OPENDRAIN;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
   GPIO_InitStruct.Alternate = LL_GPIO_AF_1;
   LL_GPIO_Init(SCL_GPIO_Port, &GPIO_InitStruct);
 
@@ -412,7 +473,7 @@ static void MX_I2C1_Init(void)
   GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_OPENDRAIN;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
   GPIO_InitStruct.Alternate = LL_GPIO_AF_1;
   LL_GPIO_Init(SDA_GPIO_Port, &GPIO_InitStruct);
 
@@ -437,13 +498,17 @@ static void MX_I2C1_Init(void)
   I2C_InitStruct.Timing = 0x2000090E;
   I2C_InitStruct.AnalogFilter = LL_I2C_ANALOGFILTER_ENABLE;
   I2C_InitStruct.DigitalFilter = 0;
-  I2C_InitStruct.OwnAddress1 = 192;
+  I2C_InitStruct.OwnAddress1 = cfg.addr;
   I2C_InitStruct.TypeAcknowledge = LL_I2C_ACK;
   I2C_InitStruct.OwnAddrSize = LL_I2C_OWNADDRESS1_7BIT;
   LL_I2C_Init(I2C1, &I2C_InitStruct);
   LL_I2C_SetOwnAddress2(I2C1, 0, LL_I2C_OWNADDRESS2_NOMASK);
   /* USER CODE BEGIN I2C1_Init 2 */
-
+  LL_I2C_EnableIT_ADDR(I2C1);
+  LL_I2C_EnableIT_STOP(I2C1);
+  LL_I2C_EnableIT_RX(I2C1);
+  LL_I2C_EnableIT_TX(I2C1);
+  
   /* USER CODE END I2C1_Init 2 */
 
 }
@@ -475,7 +540,7 @@ static void MX_LPUART1_UART_Init(void)
   GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
   GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_HIGH;
   GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
   GPIO_InitStruct.Alternate = LL_GPIO_AF_6;
   LL_GPIO_Init(DBG_TX_GPIO_Port, &GPIO_InitStruct);
 
@@ -560,16 +625,12 @@ static void MX_TIM2_Init(void)
   TIM_InitStruct.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
   LL_TIM_Init(TIM2, &TIM_InitStruct);
   LL_TIM_DisableARRPreload(TIM2);
-  LL_TIM_SetTriggerInput(TIM2, LL_TIM_TS_ETRF);
-  LL_TIM_SetClockSource(TIM2, LL_TIM_CLOCKSOURCE_EXT_MODE1);
-  LL_TIM_DisableExternalClock(TIM2);
   LL_TIM_ConfigETR(TIM2, LL_TIM_ETR_POLARITY_NONINVERTED, LL_TIM_ETR_PRESCALER_DIV1, LL_TIM_ETR_FILTER_FDIV1);
-  LL_TIM_DisableIT_TRIG(TIM2);
-  LL_TIM_DisableDMAReq_TRIG(TIM2);
+  LL_TIM_SetClockSource(TIM2, LL_TIM_CLOCKSOURCE_EXT_MODE2);
   LL_TIM_SetTriggerOutput(TIM2, LL_TIM_TRGO_RESET);
   LL_TIM_DisableMasterSlaveMode(TIM2);
   /* USER CODE BEGIN TIM2_Init 2 */
-
+  LL_TIM_EnableCounter(TIM2);
   /* USER CODE END TIM2_Init 2 */
 
 }
@@ -614,16 +675,12 @@ static void MX_TIM21_Init(void)
   TIM_InitStruct.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
   LL_TIM_Init(TIM21, &TIM_InitStruct);
   LL_TIM_DisableARRPreload(TIM21);
-  LL_TIM_SetTriggerInput(TIM21, LL_TIM_TS_ETRF);
-  LL_TIM_SetClockSource(TIM21, LL_TIM_CLOCKSOURCE_EXT_MODE1);
-  LL_TIM_DisableExternalClock(TIM21);
   LL_TIM_ConfigETR(TIM21, LL_TIM_ETR_POLARITY_NONINVERTED, LL_TIM_ETR_PRESCALER_DIV1, LL_TIM_ETR_FILTER_FDIV1);
-  LL_TIM_DisableIT_TRIG(TIM21);
-  LL_TIM_DisableDMAReq_TRIG(TIM21);
+  LL_TIM_SetClockSource(TIM21, LL_TIM_CLOCKSOURCE_EXT_MODE2);
   LL_TIM_SetTriggerOutput(TIM21, LL_TIM_TRGO_RESET);
   LL_TIM_DisableMasterSlaveMode(TIM21);
   /* USER CODE BEGIN TIM21_Init 2 */
-
+  LL_TIM_EnableCounter(TIM21);
   /* USER CODE END TIM21_Init 2 */
 
 }
@@ -670,7 +727,7 @@ static void MX_GPIO_Init(void)
   /**/
   GPIO_InitStruct.Pin = BOOT0_Pin;
   GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+  GPIO_InitStruct.Pull = LL_GPIO_PULL_DOWN;
   LL_GPIO_Init(BOOT0_GPIO_Port, &GPIO_InitStruct);
 
   /**/

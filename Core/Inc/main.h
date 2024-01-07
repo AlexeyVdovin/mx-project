@@ -69,6 +69,9 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+void LPUART_TxCpltCallback();
+void I2C1_Slave_RX(uint8_t n, uint8_t data);
+uint8_t I2C1_Slave_TX();
 
 /* USER CODE END EFP */
 
